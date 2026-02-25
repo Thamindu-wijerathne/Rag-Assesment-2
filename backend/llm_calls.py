@@ -1,8 +1,20 @@
+import json
+from typing import Any, Callable, Dict, List, Tuple
 from helper import _safe_json_extract
 from groq import AsyncGroq
 import os
 
 groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+
+def retrieve_context(vs, query: str, k: int = 4):
+    docs = vs.similarity_search(query, k=k)
+    context = "\n\n".join(
+        f"[source={d.metadata.get('source','doc')} page={d.metadata.get('page','?')}]\n{d.page_content}"
+        for d in docs
+    )
+    sources = [{"source": d.metadata.get("source"), "page": d.metadata.get("page")} for d in docs]
+    return context, sources
+
 
 RETRIEVE_TOOL = {
     "type": "function",
@@ -67,6 +79,7 @@ async def guardrail_classify(quection):
     text = resp.choices[0].message.content or ""
     return _safe_json_extract(text)
 
+
 async def generate_answer_from_context(context: str, question: str) -> str:
     system = (
         "You are a helpful assistant. Answer ONLY using the provided context. "
@@ -84,3 +97,66 @@ async def generate_answer_from_context(context: str, question: str) -> str:
         temperature=0,
     )
     return completion.choices[0].message.content or ""
+
+
+async def agentic_rag_answer(
+    retrieve_fn: Callable[[str, int], Tuple[str, List[Dict[str, Any]]]],
+    question: str,
+    top_k: int = 4,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    # print("agen runned")
+    """
+    retrieve_fn(query, k) -> (context_text, sources_list)
+    """
+
+    system = (
+        "You are a RAG agent. Use the tool `retrieve_context` when you need info. "
+        "You may call it multiple times with refined queries. "
+        "Answer using retrieved context only."
+    )
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": question},
+    ]
+
+    sources_accum: List[Dict[str, Any]] = []
+    tool_choice = "required"  # force at least one retrieval
+
+    for _ in range(4):
+        resp = await groq_client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=messages,
+            tools=[RETRIEVE_TOOL],
+            tool_choice=tool_choice,
+            temperature=0,
+            max_tokens=800,
+        )
+
+        msg = resp.choices[0].message
+        print("msg", msg , "\n")
+        tool_calls = getattr(msg, "tool_calls", None)
+
+        if tool_calls:
+            for call in tool_calls:
+                args = json.loads(call.function.arguments or "{}")
+                q = args.get("query", question)
+                k = int(args.get("k", top_k))
+
+                ctx, src = retrieve_fn(q, k)
+                sources_accum.extend(src)
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "name": "retrieve_context",
+                    "content": ctx,
+                })
+
+            tool_choice = "auto"
+            continue
+
+        # final answer (no more tool calls)
+        return (msg.content or ""), sources_accum
+
+    return "I'm sorry, I couldn't complete the request.", sources_accum
