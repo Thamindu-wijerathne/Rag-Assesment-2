@@ -20,7 +20,7 @@ RETRIEVE_TOOL = {
     "type": "function",
     "function": {
         "name": "retrieve_context",
-        "description": "Retrieve relevant context from the uploaded document.",
+        "description": "Retrieve relevant context of medical information from the uploaded document.",
         "parameters": {
             "type": "object",
             "properties": {
